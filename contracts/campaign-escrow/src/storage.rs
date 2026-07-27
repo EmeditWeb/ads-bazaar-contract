@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use ads_bazaar_shared::CampaignId;
-use soroban_sdk::{contracttype, Address, Env, String};
+use soroban_sdk::{contracttype, Address, Env, String, Vec};
 
 use crate::error::Error;
 use crate::types::{Application, Campaign};
@@ -35,10 +35,12 @@ pub enum DataKey {
     /// Whether the contract is currently paused. See `require_not_paused`
     /// and `pause`/`unpause` in `lib.rs`.
     Paused,
-    /// Count of creators that have applied to a campaign. Used by
+    /// Ordered list of creator addresses that have applied to a campaign.
+    /// Used by `campaign_applicants` to enumerate all applicants so clients
+    /// can list them without relying on event logs alone. Also used by
     /// `update_campaign_metadata` to enforce that the brief is locked once
     /// any creator has applied.
-    ApplicantCount(CampaignId),
+    CampaignApplicants(CampaignId),
 }
 
 pub fn is_initialized(env: &Env) -> bool {
@@ -188,14 +190,20 @@ pub fn set_paused(env: &Env, paused: bool) {
     env.storage().instance().set(&DataKey::Paused, &paused);
 }
 
-/// Increment the applicant count for `campaign_id`. Called from
-/// `apply_to_campaign` so `update_campaign_metadata` can lock the brief
-/// once at least one creator has applied. O(1) regardless of how many
-/// creators have applied, unlike an ever-growing list of applicants.
-pub fn add_campaign_applicant(env: &Env, campaign_id: CampaignId, _creator: &Address) {
-    let key = DataKey::ApplicantCount(campaign_id);
-    let count: u32 = env.storage().persistent().get(&key).unwrap_or(0);
-    env.storage().persistent().set(&key, &(count + 1));
+/// Append the creator's address to the ordered applicant list for
+/// `campaign_id`. Called from `apply_to_campaign` so clients can enumerate
+/// every applicant via `campaign_applicants` without relying on event
+/// logs alone, and so `update_campaign_metadata` can lock the brief once
+/// at least one creator has applied.
+pub fn add_campaign_applicant(env: &Env, campaign_id: CampaignId, creator: &Address) {
+    let key = DataKey::CampaignApplicants(campaign_id);
+    let mut applicants: Vec<Address> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+    applicants.push_back(creator.clone());
+    env.storage().persistent().set(&key, &applicants);
     env.storage().persistent().extend_ttl(
         &key,
         PERSISTENT_LIFETIME_THRESHOLD,
@@ -205,9 +213,28 @@ pub fn add_campaign_applicant(env: &Env, campaign_id: CampaignId, _creator: &Add
 
 /// Return whether any creator has applied to `campaign_id`.
 pub fn has_campaign_applicants(env: &Env, campaign_id: CampaignId) -> bool {
-    let count: Option<u32> = env
+    let applicants: Option<Vec<Address>> = env
         .storage()
         .persistent()
-        .get(&DataKey::ApplicantCount(campaign_id));
-    count.is_some_and(|c| c > 0)
+        .get(&DataKey::CampaignApplicants(campaign_id));
+    applicants.is_some_and(|v| !v.is_empty())
+}
+
+/// Return the ordered list of creator addresses that have applied to
+/// `campaign_id`. Returns an empty `Vec` when no one has applied yet.
+/// Bumps the TTL of the `CampaignApplicants` persistent entry on every
+/// read so it doesn't expire from ledger storage (only when the entry
+/// already exists — an empty list with no stored key is harmless to
+/// skip).
+pub fn get_campaign_applicants(env: &Env, campaign_id: CampaignId) -> Vec<Address> {
+    let key = DataKey::CampaignApplicants(campaign_id);
+    let applicants: Option<Vec<Address>> = env.storage().persistent().get(&key);
+    if let Some(ref _applicants) = applicants {
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_LEDGERS,
+        );
+    }
+    applicants.unwrap_or_else(|| Vec::new(env))
 }

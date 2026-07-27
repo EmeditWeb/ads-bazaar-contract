@@ -21,7 +21,7 @@ pub use error::Error;
 pub use types::{Application, Campaign, DisputeResolution, ProtocolConfig};
 
 use ads_bazaar_shared::{ApplicationStatus, CampaignId, CampaignStatus, PayoutAsset};
-use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env, String};
+use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env, String, Vec};
 
 /// Version string stored at `initialize` time. `upgrade` swaps the WASM
 /// binary but does not bump this on its own — see the TODO on `upgrade`
@@ -961,6 +961,15 @@ impl CampaignEscrowContract {
         }
         .publish(&env);
         Ok(())
+    }
+
+    /// Read-only lookup of the ordered list of creator addresses that have
+    /// applied to a campaign (not yet filtered by status). Returns an empty
+    /// `Vec` when no one has applied yet. The caller can then fetch
+    /// individual `get_application(campaign_id, creator)` to read each
+    /// applicant's status.
+    pub fn campaign_applicants(env: Env, campaign_id: CampaignId) -> Vec<Address> {
+        storage::get_campaign_applicants(&env, campaign_id)
     }
 
     /// Read-only lookup of a campaign's current state.
